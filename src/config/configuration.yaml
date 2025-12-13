@@ -1,0 +1,16 @@
+astra_db:
+  collection_name: "ecommercedata"
+
+embedding_model:
+  provider: "aws"
+  model_name: "amazon.titan-embed-text-v2:0"
+
+retriver:
+  top_k: 4
+
+llm:
+  groq:
+    provider: "groq"
+    model_name: "openai/gpt-oss-120b"
+    temperature: 0
+    max_output_token: 2048
