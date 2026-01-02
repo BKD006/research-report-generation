@@ -2,9 +2,7 @@ import os
 import sys
 import re
 from datetime import datetime
-from typing import Optional
 from langgraph.types import Send
-from jinja2 import Template
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -276,7 +274,7 @@ class AutonomousReportGenerator:
 
             # Root folder
             project_root=os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
-            root_dir= os.path.abspath(project_root, "generated_report")
+            root_dir= os.path.join(project_root, "generated_report")
 
             # Create subfolder for this report
             report_folder= os.path.join(root_dir, base_name)
