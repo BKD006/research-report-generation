@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from src.utils.config_loader import load_config
 from langchain_aws.embeddings.bedrock import BedrockEmbeddings
 from langchain_groq import ChatGroq
+from langchain_openai import ChatOpenAI
 from src.logger import GLOBAL_LOGGER as log
 from src.exception.custom_exception import ResearchAnalystException
 
@@ -15,6 +16,8 @@ class APIKeyManager:
             "AWS_SECRET_ACCESS_KEY": os.getenv("AWS_SECRET_ACCESS_KEY"),
             "AWS_ACCESS_KEY_ID": os.getenv("AWS_ACCESS_KEY_ID"),
             "AWS_DEFAULT_REGION": os.getenv("AWS_DEFAULT_REGION"),
+            "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY"),
+            "OPENAI_ENDPOINT": os.getenv("OPENAI_ENDPOINT"),
                 }
         
         #Load loaded key statuses without exposing secrets
@@ -74,7 +77,7 @@ class ModelLoader:
         """
         try:
             llm_block = self.config["llm"]
-            provider_key = os.getenv("LLM_PROVIDER", "groq")
+            provider_key = os.getenv("LLM_PROVIDER", "openai")
 
             if provider_key not in llm_block:
                 log.error("LLM provider not found in configuration", provider=provider_key)
@@ -93,6 +96,14 @@ class ModelLoader:
                     model=model_name,
                     api_key=self.api_key_mgr.get("GROQ_API_KEY"),
                     temperature=temperature,
+                )
+            elif provider == "openai":
+                print(self.api_key_mgr.get("OPENAI_API_KEY"))
+                llm= ChatOpenAI(
+                    model=model_name,
+                    base_url=self.api_key_mgr.get("OPENAI_ENDPOINT"),
+                    api_key=self.api_key_mgr.get("OPENAI_API_KEY"),
+                    temperature=temperature
                 )
             else:
                 log.error("Unsupported LLM provider encountered", provider=provider)
