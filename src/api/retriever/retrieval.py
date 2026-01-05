@@ -21,13 +21,17 @@ class Retriever:
 
     def __init__(self):
         """Initialize retriever with config and environment setup."""
-        print("🔍 Initializing Retriever Pipeline (ChromaDB)...")
+        print("Initializing Retriever Pipeline (ChromaDB)...")
         self.model_loader = ModelLoader()
         self.config = load_config()
         self._load_env_variables()
 
         self.vstore = None
         self.retriever_instance = None
+
+    def _load_env_variables(self):
+        """Load environment variables."""
+        load_dotenv()
 
     def load_retriever(self):
         """
