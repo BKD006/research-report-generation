@@ -1,24 +1,45 @@
-langgraph==0.6.8
-langchain_community==0.3.30
-langchain_core==1.2.6
-tavily-python==0.7.12
-wikipedia==1.4.0
-langchain-aws==0.2.35
-langchain-groq==0.3.6
-structlog==25.4.0
-python-docx==1.2.0
-reportlab==4.4.4
-fastapi==0.120.0
-uvicorn==0.38.0
-jinja2==3.1.6
-httpx==0.28.1
+# Core LangChain stack (1.x compatible)
+langchain-core>=1.2.6
+langchain-community>=0.3.30
+langgraph>=0.6.8
+langchain
+langchain-text-splitters
+
+# AWS / Groq
+langchain-aws>=0.1.20
+langchain-groq>=0.3.6
+
+# Vector DB
+chromadb>=1.4.0
+faiss-cpu
+langchain-chroma>=1.1.0
+
+# Web / API
+fastapi>=0.120.0
+uvicorn>=0.38.0
+httpx>=0.28.1
+jinja2>=3.1.6
 aiofiles>=23.2.1
-sqlalchemy==2.0.43
-bcrypt==3.2.2
-passlib==1.7.4
 python-multipart
+
+# Docs
+python-docx>=1.2.0
+reportlab>=4.4.4
+pypdf2
+pypdf
+pymupdf
+
+# Security
+
+passlib>=1.7.4
+
+# Infra / Utils
 boto3
+structlog>=25.4.0
+sqlalchemy>=2.0.43
+
+# Dev
 ipykernel
-pygraphviz
-chromadb==1.4.0
-langchain-chroma==1.1.0
+streamlit==1.52.2
+tavily-python>=0.7.12
+wikipedia==1.4.0
