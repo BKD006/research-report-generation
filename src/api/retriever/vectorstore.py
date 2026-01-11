@@ -1,95 +1,261 @@
-from typing import List, Optional
+import os
+import hashlib
+from typing import List, Optional, Set
 
-from langchain_chroma import Chroma
 from langchain_core.documents import Document
+from langchain_community.vectorstores import FAISS
 
-from src.utils.config_loader import load_config
 from src.utils.model_loader import ModelLoader
+from src.utils.config_loader import load_config
 from src.logger import GLOBAL_LOGGER
-logger= GLOBAL_LOGGER.bind(module="AutonomousReportGenerator")
+
+logger = GLOBAL_LOGGER.bind(module="VectorStoreManager")
 
 
 class VectorStoreManager:
     """
-    Manages vector store initialization and persistence.
+    FAISS-backed persistent vector store manager.
 
-    Responsibilities:
-      - Initialize Chroma vector store
-      - Add documents to collection
-      - Persist vector store to disk
-      - Provide retriever access point
+    Supports:
+    - Load existing FAISS index from disk
+    - Create a new index on first ingestion
+    - Add documents with auto-embedding
+    - Add documents with explicit embeddings (EmbeddingService)
+    - Stable chunk ids for multi-file ingestion
+    - Optional deduplication (idempotent ingestion)
     """
 
     def __init__(self):
-        self.config = load_config()
-        self.model_loader = ModelLoader()
+        config = load_config()
+        faiss_cfg = config.get("faiss", {})
 
-        chroma_cfg = self.config.get("chroma", {})
-        self.collection_name = chroma_cfg.get(
-            "collection_name", "research_report"
-        )
-        self.persist_directory = chroma_cfg.get(
-            "persist_directory", "./chroma_db"
-        )
+        self.persist_directory = faiss_cfg.get("persist_directory", "./faiss_db")
+        self.embedding_fn = ModelLoader().load_embeddings()
+        self._vectorstore: Optional[FAISS] = None
 
-        self._vector_store: Optional[Chroma] = None
+    # ==================================================
+    # LOAD OR CREATE
+    # ==================================================
 
-    def get_vector_store(self) -> Chroma:
+    def get_or_create(self) -> Optional[FAISS]:
         """
-        Lazily initialize and return the Chroma vector store.
-
-        Returns:
-            Chroma
+        Loads FAISS vectorstore from disk if it exists.
+        If not, keeps it as None (created on first add).
         """
-        if self._vector_store is None:
-            logger.info(
-                f"Initializing Chroma collection '{self.collection_name}'"
+        if self._vectorstore is not None:
+            return self._vectorstore
+
+        os.makedirs(self.persist_directory, exist_ok=True)
+
+        faiss_index_path = os.path.join(self.persist_directory, "index.faiss")
+        if os.path.exists(faiss_index_path):
+            logger.info(f"Loading existing FAISS vectorstore from {self.persist_directory}")
+            self._vectorstore = FAISS.load_local(
+                self.persist_directory,
+                embeddings=self.embedding_fn,
+                allow_dangerous_deserialization=True,
             )
+        else:
+            logger.info("FAISS index does not exist yet. Will create on first add.")
+            self._vectorstore = None
 
-            self._vector_store = Chroma(
-                collection_name=self.collection_name,
-                embedding_function=self.model_loader.load_embeddings(),
-                persist_directory=self.persist_directory,
-            )
+        return self._vectorstore
 
-        return self._vector_store
+    # ==================================================
+    # ADD DOCUMENTS (AUTO-EMBED)
+    # ==================================================
 
-    def add_documents(self, documents: List[Document]):
+    def add_documents(
+        self,
+        documents: List[Document],
+        *,
+        deduplicate: bool = True,
+    ) -> FAISS:
         """
-        Add documents to the vector store and persist.
+        Add documents to FAISS and embed internally using embedding_fn.
 
         Args:
-            documents (List[Document])
+            documents: List[Document]
+            deduplicate: Skip chunks already present (idempotent ingestion)
+
+        Returns:
+            FAISS vectorstore
         """
         if not documents:
-            logger.warning("No documents provided to vector store.")
+            raise ValueError("No documents provided for ingestion.")
+
+        # Ensure we load existing store if present
+        self.get_or_create()
+
+        # Assign stable ids
+        ids = [self._make_chunk_uid(doc) for doc in documents]
+
+        # Optional deduplication
+        if deduplicate and self._vectorstore is not None:
+            existing = self._existing_ids()
+            keep_idx = [i for i, _id in enumerate(ids) if _id not in existing]
+
+            if not keep_idx:
+                logger.info("All chunks already exist. Nothing to add.")
+                return self._vectorstore
+
+            documents = [documents[i] for i in keep_idx]
+            ids = [ids[i] for i in keep_idx]
+
+            logger.info(f"Deduplication enabled. Adding {len(documents)} new chunks.")
+
+        # Attach chunk_uid metadata
+        for doc, chunk_uid in zip(documents, ids):
+            doc.metadata["chunk_uid"] = chunk_uid
+
+        # Create vs append
+        if self._vectorstore is None:
+            logger.info("Creating FAISS index from first batch (auto-embed).")
+            self._vectorstore = FAISS.from_documents(
+                documents,
+                embedding=self.embedding_fn,
+                ids=ids,
+            )
+        else:
+            logger.info("Appending documents to existing FAISS index (auto-embed).")
+            self._vectorstore.add_documents(
+                documents,
+                ids=ids,
+            )
+
+        self._persist()
+        logger.info(f"Added {len(documents)} documents to FAISS.")
+        return self._vectorstore
+
+    # ==================================================
+    # ADD DOCUMENTS WITH EXPLICIT EMBEDDINGS
+    # ==================================================
+
+    def add_documents_with_embeddings(
+        self,
+        documents: List[Document],
+        embeddings: List[List[float]],
+        *,
+        deduplicate: bool = True,
+    ) -> FAISS:
+        """
+        Store documents into FAISS using precomputed embeddings.
+
+        Args:
+            documents: List[Document]
+            embeddings: List[List[float]]
+            deduplicate: Skip chunks already present (idempotent ingestion)
+
+        Returns:
+            FAISS vectorstore
+        """
+        if not documents or not embeddings:
+            raise ValueError("Documents and embeddings are required.")
+
+        if len(documents) != len(embeddings):
+            raise ValueError("Documents and embeddings length mismatch.")
+
+        # Ensure we load existing store if present
+        self.get_or_create()
+
+        # Assign stable ids
+        ids = [self._make_chunk_uid(doc) for doc in documents]
+
+        # Optional deduplication
+        if deduplicate and self._vectorstore is not None:
+            existing = self._existing_ids()
+            keep_idx = [i for i, _id in enumerate(ids) if _id not in existing]
+
+            if not keep_idx:
+                logger.info("All chunks already exist. Nothing to add.")
+                return self._vectorstore
+
+            documents = [documents[i] for i in keep_idx]
+            embeddings = [embeddings[i] for i in keep_idx]
+            ids = [ids[i] for i in keep_idx]
+
+            logger.info(f"Deduplication enabled. Adding {len(documents)} new chunks.")
+
+        # Attach chunk_uid metadata
+        for doc, chunk_uid in zip(documents, ids):
+            doc.metadata["chunk_uid"] = chunk_uid
+
+        # Required LangChain format: List[(text, embedding)]
+        text_embeddings = [(doc.page_content, emb) for doc, emb in zip(documents, embeddings)]
+        metadatas = [doc.metadata for doc in documents]
+
+        if self._vectorstore is None:
+            logger.info("Creating FAISS index from first embedded batch.")
+            self._vectorstore = FAISS.from_embeddings(
+                text_embeddings=text_embeddings,
+                embedding=self.embedding_fn,
+                metadatas=metadatas,
+                ids=ids,
+            )
+        else:
+            logger.info("Appending embeddings to existing FAISS index.")
+            self._vectorstore.add_embeddings(
+                text_embeddings=text_embeddings,
+                metadatas=metadatas,
+                ids=ids,
+            )
+
+        self._persist()
+        logger.info(f"Added {len(documents)} embedded chunks to FAISS.")
+        return self._vectorstore
+
+    # ==================================================
+    # PERSISTENCE
+    # ==================================================
+
+    def _persist(self):
+        if self._vectorstore is None:
             return
+        self._vectorstore.save_local(self.persist_directory)
+        logger.info("FAISS vectorstore persisted.")
 
-        vector_store = self.get_vector_store()
-        vector_store.add_documents(documents)
-        vector_store.persist()
+    # ==================================================
+    # HELPERS
+    # ==================================================
 
-        logger.info(
-            f"Added {len(documents)} documents to Chroma collection "
-            f"'{self.collection_name}'"
-        )
-
-    def reset_collection(self):
+    def _existing_ids(self) -> Set[str]:
         """
-        Delete and recreate the vector store collection.
-        USE WITH CAUTION.
+        Return the current ids in docstore (if any).
         """
-        logger.warning(
-            f"Resetting Chroma collection '{self.collection_name}'"
-        )
+        try:
+            # docstore is usually InMemoryDocstore with `_dict`
+            docstore_dict = self._vectorstore.docstore._dict  # type: ignore
+            return set(docstore_dict.keys())
+        except Exception:
+            return set()
 
-        self._vector_store = Chroma(
-            collection_name=self.collection_name,
-            embedding_function=self.model_loader.load_embeddings(),
-            persist_directory=self.persist_directory,
-            client_settings={"allow_reset": True},
-        )
-        self._vector_store.delete_collection()
-        self._vector_store.persist()
+    def _make_chunk_uid(self, doc: Document) -> str:
+        """
+        Build a stable unique id for each chunk.
 
-        logger.info("Vector store collection reset completed.")
+        Uses:
+        - file_name / source
+        - page (if exists)
+        - chunk_id (if exists)
+        - content hash
+        """
+        file_name = str(doc.metadata.get("file_name", doc.metadata.get("source", "unknown")))
+        page = str(doc.metadata.get("page", doc.metadata.get("page_number", "")))
+        chunk_id = str(doc.metadata.get("chunk_id", ""))
+
+        content_hash = hashlib.md5(doc.page_content.encode("utf-8")).hexdigest()[:12]
+        return f"{file_name}::p{page}::c{chunk_id}::{content_hash}"
+
+    # ==================================================
+    # UTILITY
+    # ==================================================
+
+    def count(self) -> int:
+        """
+        Number of vectors stored in FAISS.
+        """
+        if self._vectorstore is None:
+            self.get_or_create()
+        if self._vectorstore is None:
+            return 0
+        return self._vectorstore.index.ntotal
